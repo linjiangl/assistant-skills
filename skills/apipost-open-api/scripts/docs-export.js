@@ -12,6 +12,10 @@
  *   node <skill>/scripts/docs-export.js --out docs/api.md
  *   node <skill>/scripts/docs-export.js --no-details
  *   node <skill>/scripts/docs-export.js --json
+ *   node <skill>/scripts/docs-export.js --format openapi [--out openapi.json]
+ *
+ * 输出形态:默认 Markdown; `--format openapi` 输出 OpenAPI 3.0 JSON(供前端类型/SDK 生成);
+ * `--json` 输出 Apipost 原始 JSON 结构。
  *
  * api_key 在进程内使用，不会打印到输出。
  */
@@ -451,18 +455,433 @@ function exportJson(cfg, projectInfo, globalParam, tree, details) {
   );
 }
 
+// ---------------- OpenAPI 渲染 ----------------
+
+// Apipost field_type → JSON Schema type
+const FIELD_TYPE_MAP = {
+  string: 'string', str: 'string', text: 'string', char: 'string',
+  number: 'number', num: 'number', float: 'number', double: 'number',
+  int: 'integer', integer: 'integer', long: 'integer',
+  boolean: 'boolean', bool: 'boolean',
+  array: 'array', list: 'array',
+  object: 'object', json: 'object',
+  file: 'string', binary: 'string',
+  null: 'null', undefined: 'string',
+};
+
+function mapFieldType(t) {
+  const key = String(t || '').toLowerCase().trim();
+  return FIELD_TYPE_MAP[key] || 'string';
+}
+
+// 规范化 Apipost schema 为标准 JSON Schema:
+// 剔除 Apipost 私有的 APIPOST_ORDERS,并按其重排 properties 顺序(保留给前端类型生成的可读顺序)
+function normalizeSchema(schema, depth = 0) {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return schema;
+  if (depth > 30) return {}; // 防御性递归深度
+  const out = {};
+  for (const k of Object.keys(schema)) {
+    if (k === 'APIPOST_ORDERS') continue;
+    let v = schema[k];
+    if (k === 'properties' && v && typeof v === 'object' && !Array.isArray(v)) {
+      const keys = Object.keys(v);
+      const orders = Array.isArray(schema.APIPOST_ORDERS) ? schema.APIPOST_ORDERS : [];
+      const ordered = orders.filter((o) => v[o] != null);
+      const rest = keys.filter((o) => !ordered.includes(o));
+      const merged = {};
+      for (const o of ordered) merged[o] = normalizeSchema(v[o], depth + 1);
+      for (const o of rest) merged[o] = normalizeSchema(v[o], depth + 1);
+      v = merged;
+    } else if (k === 'items' && v && typeof v === 'object' && !Array.isArray(v)) {
+      v = normalizeSchema(v, depth + 1);
+    }
+    out[k] = v;
+  }
+  return out;
+}
+
+// 无 raw_schema 时,从 raw JSON 字符串反推 schema(兜底)
+function inferSchemaFromRaw(raw) {
+  if (!raw || typeof raw !== 'string' || !raw.trim()) return undefined;
+  try {
+    return inferSchemaFromValue(JSON.parse(raw));
+  } catch {
+    return undefined;
+  }
+}
+
+function inferSchemaFromValue(v) {
+  if (v == null) return { type: 'string' };
+  if (Array.isArray(v)) {
+    return { type: 'array', items: v.length ? inferSchemaFromValue(v[0]) : {} };
+  }
+  if (typeof v === 'object') {
+    const properties = {};
+    for (const k of Object.keys(v)) properties[k] = inferSchemaFromValue(v[k]);
+    return { type: 'object', properties };
+  }
+  if (typeof v === 'number') return Number.isInteger(v) ? { type: 'integer' } : { type: 'number' };
+  if (typeof v === 'boolean') return { type: 'boolean' };
+  return { type: 'string' };
+}
+
+function paramRequired(p, location) {
+  if (location === 'path') return true; // OpenAPI 规定 path 参数必填
+  const nn = p.not_null;
+  return nn === 1 || nn === '1' || nn === true;
+}
+
+// 单个 parameter 项 → OpenAPI parameter 对象
+function paramToParameter(p, location) {
+  const name = String((p && p.key) || '');
+  if (!name) return null;
+  const schema = (p.schema && typeof p.schema === 'object' && !Array.isArray(p.schema))
+    ? normalizeSchema(p.schema)
+    : { type: mapFieldType(p.field_type) };
+  return {
+    name,
+    in: location,
+    required: paramRequired(p, location),
+    description: String((p && p.description) || ''),
+    schema,
+  };
+}
+
+function paramsToParameters(params, location) {
+  return (params || [])
+    .filter((p) => p && typeof p === 'object')
+    .map((p) => paramToParameter(p, location))
+    .filter(Boolean);
+}
+
+// parameter[] → object schema,支持点路径 key(如 "data.access_token")展开为嵌套 object
+// 适用于 form-data/urlencoded 的 body.parameter、json 的 raw_parameter、response 的 raw_parameter
+function leafSchemaOf(p) {
+  if (p.schema && typeof p.schema === 'object' && !Array.isArray(p.schema)) {
+    const s = normalizeSchema(p.schema);
+    if (p.description && !s.description) s.description = String(p.description);
+    return s;
+  }
+  if (String(p.field_type || '').toLowerCase() === 'file') {
+    return { type: 'string', format: 'binary', ...(p.description ? { description: String(p.description) } : {}) };
+  }
+  return { type: mapFieldType(p.field_type), ...(p.description ? { description: String(p.description) } : {}) };
+}
+
+function paramsToSchema(params) {
+  const root = { type: 'object', properties: {}, required: [] };
+  for (const p of (params || [])) {
+    if (!p || !p.key) continue;
+    const segments = String(p.key).split('.');
+    let parent = root;
+    // 建/找中间 object 节点
+    for (let i = 0; i < segments.length - 1; i++) {
+      const seg = segments[i];
+      let node = parent.properties[seg];
+      if (!node) {
+        node = { type: 'object', properties: {}, required: [] };
+        parent.properties[seg] = node;
+      } else if (!node.properties) {
+        node.type = 'object';
+        node.properties = {};
+        node.required = [];
+      }
+      parent = node;
+    }
+    const leafKey = segments[segments.length - 1];
+    parent.properties[leafKey] = leafSchemaOf(p);
+    if (paramRequired(p, 'body') && !parent.required.includes(leafKey)) {
+      parent.required.push(leafKey);
+    }
+  }
+  // 清理空 required
+  const clean = (node) => {
+    if (node.properties) {
+      for (const k of Object.keys(node.properties)) clean(node.properties[k]);
+      if (node.required && node.required.length === 0) delete node.required;
+    }
+  };
+  clean(root);
+  return root;
+}
+
+// schema 是否含实质 properties(非空占位)。Apipost 的 raw_schema 常为 {"type":"object"} 空壳,
+// 真正字段在 raw_parameter;此函数用于判断该回退到 raw_parameter
+function schemaHasProperties(schema) {
+  return !!schema && typeof schema === 'object' && !Array.isArray(schema)
+    && schema.properties && Object.keys(schema.properties).length > 0;
+}
+
+function bodyToRequestBody(mode, body) {
+  const m = String(mode || 'none').toLowerCase();
+  if (!m || m === 'none') return undefined;
+  const content = {};
+  if (m === 'json' || m === 'raw') {
+    let parsed;
+    let isJson = false;
+    if (body.raw && typeof body.raw === 'string' && body.raw.trim()) {
+      try { parsed = JSON.parse(body.raw); isJson = true; } catch { /* 非 JSON,按文本处理 */ }
+    }
+    const ct = (m === 'json' || isJson) ? 'application/json' : 'text/plain';
+    const entry = {};
+    // schema 优先级: raw_schema(有实质 properties) > raw_parameter(点路径展开) > 从 raw 反推
+    if (schemaHasProperties(body.raw_schema)) {
+      entry.schema = normalizeSchema(body.raw_schema);
+    } else if (Array.isArray(body.raw_parameter) && body.raw_parameter.length) {
+      entry.schema = paramsToSchema(body.raw_parameter);
+    } else if (isJson) {
+      entry.schema = inferSchemaFromValue(parsed);
+    }
+    if (body.raw) entry.example = isJson ? parsed : body.raw;
+    content[ct] = entry;
+  } else if (m === 'form-data') {
+    content['multipart/form-data'] = { schema: paramsToSchema(asParams(body.parameter)) };
+  } else if (m === 'urlencoded') {
+    content['application/x-www-form-urlencoded'] = { schema: paramsToSchema(asParams(body.parameter)) };
+  } else if (m === 'binary') {
+    content['application/octet-stream'] = { schema: { type: 'string', format: 'binary' } };
+  }
+  if (!Object.keys(content).length) return undefined;
+  return { content };
+}
+
+function normalizeContentType(ct) {
+  const c = String(ct || 'json').toLowerCase().trim();
+  if (!c || c === 'json') return 'application/json';
+  if (c.startsWith('application/json') || c === 'json') return 'application/json';
+  if (c.startsWith('xml') || c.includes('xml')) return 'application/xml';
+  if (c === 'html' || c.includes('html')) return 'text/html';
+  if (c === 'text' || c === 'plain') return 'text/plain';
+  if (c.startsWith('application/') || c.startsWith('text/')) return c.split(';')[0].trim();
+  return 'application/json';
+}
+
+function responseToOpenApi(response) {
+  const out = {};
+  const examples = asExampleList(response);
+  if (!examples.length) return { '200': { description: '成功' } };
+  for (const ex of examples) {
+    if (!ex || typeof ex !== 'object') continue;
+    const expect = (ex.expect && typeof ex.expect === 'object') ? ex.expect : {};
+    const code = String(expect.code || '200');
+    const ct = normalizeContentType(expect.contentType || expect.content_type);
+    const entry = { description: String(expect.name || '成功') };
+    // schema 优先级: expect.schema(有实质 properties) > raw_parameter(点路径展开) > 无 schema
+    const exSchema = (expect.schema && typeof expect.schema === 'object' && !Array.isArray(expect.schema))
+      ? expect.schema
+      : null;
+    let schema;
+    if (schemaHasProperties(exSchema)) {
+      schema = normalizeSchema(exSchema);
+    } else if (Array.isArray(ex.raw_parameter) && ex.raw_parameter.length) {
+      schema = paramsToSchema(ex.raw_parameter);
+    }
+    const content = {};
+    const item = {};
+    if (schema) item.schema = schema;
+    if (ex.raw) {
+      let exVal;
+      try { exVal = JSON.parse(ex.raw); } catch { exVal = ex.raw; }
+      item.example = exVal;
+    }
+    if (Object.keys(item).length) content[ct] = item;
+    if (Object.keys(content).length) entry.content = content;
+    // 同一状态码多个 example:后者覆盖(OpenAPI 单 example 场景,少见且可接受)
+    out[code] = entry;
+  }
+  return out;
+}
+
+// 把 Apipost URL 转成 OpenAPI path,必要时拆出 server
+function parseApiUrl(rawUrl) {
+  let url = String(rawUrl || '').trim();
+  let server = null;
+  const m = url.match(/^(https?:\/\/[^/]+)(.*)$/);
+  if (m) {
+    server = m[1];
+    url = m[2] || '/';
+  }
+  // :param → {param} (Express 风格转 OpenAPI 风格)
+  url = url.replace(/:([A-Za-z_][A-Za-z0-9_]*)/g, '{$1}');
+  if (!url.startsWith('/')) url = '/' + url;
+  return { server, path: url || '/' };
+}
+
+function slugifyOp(name) {
+  const s = String(name || '')
+    .trim()
+    .replace(/[^A-Za-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toLowerCase();
+  return s || '';
+}
+
+function makeOperationId(name, targetId, used) {
+  let slug = slugifyOp(name);
+  const id8 = String(targetId || '').replace(/[^A-Za-z0-9]/g, '').slice(-8);
+  if (!slug) {
+    // 非英文名(如纯中文):用 target_id 末段生成稳定 operationId
+    slug = 'op' + (id8 ? '_' + id8 : '');
+  }
+  if (used.has(slug)) {
+    // 冲突:追加 target_id 末段消歧(稳定,不依赖遍历顺序)
+    const suffix = id8 || 'x';
+    let final = slug + '_' + suffix;
+    let n = 2;
+    while (used.has(final)) { final = slug + '_' + suffix + '_' + n; n++; }
+    used.add(final);
+    return final;
+  }
+  used.add(slug);
+  return slug;
+}
+
+// auth.type → OpenAPI securityScheme/security(仅 bearer/basic;其余跳过)
+function authToSecurity(type, auth, schemes) {
+  const t = String(type || 'noauth').toLowerCase();
+  if (!t || t === 'noauth' || t === 'inherit') return null;
+  if (t === 'bearer') {
+    if (!schemes.BearerAuth) schemes.BearerAuth = { type: 'http', scheme: 'bearer' };
+    return { BearerAuth: [] };
+  }
+  if (t === 'basic') {
+    if (!schemes.BasicAuth) schemes.BasicAuth = { type: 'http', scheme: 'basic' };
+    return { BasicAuth: [] };
+  }
+  return null;
+}
+
+// 收集所有 api 节点(附带直接父 folder 名作为 tag)
+function collectApiOps(tree, parentFolder, out) {
+  for (const node of tree) {
+    if (node.target_type === 'folder') {
+      collectApiOps(node.children, node.name, out);
+    } else if (node.target_type === 'api') {
+      out.push({ node, tag: parentFolder });
+    }
+  }
+}
+
+const OPENAPI_METHODS = ['get', 'post', 'put', 'delete', 'patch', 'head', 'options'];
+
+function renderOpenAPI(cfg, projectInfo, globalParam, tree, details) {
+  const gp = ((globalParam || {}).global_param) || {};
+  const globalHeaders = asParams(gp.header);
+  const globalQuery = asParams(gp.query);
+  const globalAuth = gp.auth || {};
+  const globalAuthType = globalAuth.type || 'noauth';
+
+  const ops = [];
+  collectApiOps(tree, null, ops);
+
+  const paths = {};
+  const servers = new Map();
+  const opIdUsed = new Set();
+  const securitySchemes = {};
+  const globalSecurity = [];
+  let dupWarnings = 0;
+
+  for (const { node, tag } of ops) {
+    const detail = details[node.target_id] || {};
+    const request = (detail.request && typeof detail.request === 'object') ? detail.request : {};
+    const urlInfo = parseApiUrl(node.url);
+    if (urlInfo.server) servers.set(urlInfo.server, true);
+    const pathKey = urlInfo.path;
+    const methodRaw = String(node.method || 'GET').toLowerCase();
+    const method = OPENAPI_METHODS.includes(methodRaw) ? methodRaw : 'get';
+
+    const parameters = [];
+    const restful = asParams(request.restful).length ? asParams(request.restful) : asParams(request.resful);
+    for (const p of paramsToParameters(restful, 'path')) parameters.push(p);
+    for (const p of paramsToParameters(asParams(request.query), 'query')) parameters.push(p);
+    for (const p of paramsToParameters(asParams(request.header), 'header')) parameters.push(p);
+    // 并入全局 query/header(同名跳过,接口自身优先)
+    const seen = new Set(parameters.map((p) => p.in + ':' + p.name));
+    for (const p of paramsToParameters(globalQuery, 'query')) {
+      const k = 'query:' + p.name;
+      if (!seen.has(k)) { parameters.push(p); seen.add(k); }
+    }
+    for (const p of paramsToParameters(globalHeaders, 'header')) {
+      const k = 'header:' + p.name;
+      if (!seen.has(k)) { parameters.push(p); seen.add(k); }
+    }
+
+    const operation = {
+      operationId: makeOperationId(node.name, node.target_id, opIdUsed),
+      summary: node.name || '',
+    };
+    if (detail.description) operation.description = String(detail.description);
+    if (tag) operation.tags = [tag];
+    if (parameters.length) operation.parameters = parameters;
+
+    const { mode, body } = bodyInfo(request);
+    const reqBody = bodyToRequestBody(mode, body);
+    if (reqBody) operation.requestBody = reqBody;
+
+    operation.responses = responseToOpenApi(detail.response);
+
+    // 认证:接口级覆盖全局
+    const reqAuth = request.auth || {};
+    const reqAuthType = reqAuth.type || globalAuthType;
+    const sec = authToSecurity(reqAuthType, reqAuth, securitySchemes);
+    if (sec) {
+      operation.security = [sec];
+    } else if (reqAuthType === 'noauth' && globalAuthType !== 'noauth') {
+      // 显式 noauth 且存在全局认证:用空数组显式排除(否则会继承根级 security)
+      operation.security = [];
+    }
+    // inherit 或无全局认证:不设 operation.security,落到根级
+    if (globalAuthType !== 'noauth') {
+      const gsec = authToSecurity(globalAuthType, globalAuth, securitySchemes);
+      if (gsec && !globalSecurity.find((s) => JSON.stringify(s) === JSON.stringify(gsec))) {
+        globalSecurity.push(gsec);
+      }
+    }
+
+    if (!paths[pathKey]) paths[pathKey] = {};
+    if (paths[pathKey][method]) {
+      dupWarnings++;
+      console.error(`警告: ${method.toUpperCase()} ${pathKey} 重复(target_id=${node.target_id}),后者覆盖`);
+    }
+    paths[pathKey][method] = operation;
+  }
+
+  const spec = {
+    openapi: '3.0.3',
+    info: {
+      title: String((projectInfo && projectInfo.name) || 'Apipost 项目'),
+      version: '1.0.0',
+    },
+    paths,
+  };
+  if (projectInfo && projectInfo.intro) spec.info.description = String(projectInfo.intro);
+  if (servers.size) spec.servers = Array.from(servers.keys()).map((url) => ({ url }));
+  if (Object.keys(securitySchemes).length) {
+    spec.components = { securitySchemes };
+    if (globalSecurity.length) spec.security = globalSecurity;
+  }
+  spec['x-apipost-project-id'] = cfg.project_id;
+  if (dupWarnings) console.error(`(共 ${dupWarnings} 个 path+method 冲突已合并)`);
+  return spec;
+}
+
 // ---------------- main ----------------
 
 function parseArgs(argv) {
-  const out = { out: DEFAULT_OUT, noDetails: false, asJson: false };
+  const out = { out: null, noDetails: false, asJson: false, format: 'md' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--out') out.out = argv[++i];
     else if (a.startsWith('--out=')) out.out = a.slice(6);
     else if (a === '--no-details') out.noDetails = true;
     else if (a === '--json') out.asJson = true;
+    else if (a === '--format') out.format = String(argv[++i] || '').toLowerCase();
+    else if (a.startsWith('--format=')) out.format = a.slice(9).toLowerCase();
     else if (a === '-h' || a === '--help') {
-      console.log(`用法: node docs-export.js [--out FILE] [--no-details] [--json]`);
+      console.log(`用法: node docs-export.js [--out FILE] [--no-details] [--json] [--format openapi]`);
+      console.log(`  (默认) Markdown 接口文档`);
+      console.log(`  --format openapi   OpenAPI 3.0 JSON(供前端类型/SDK 生成)`);
+      console.log(`  --json            Apipost 原始 JSON 结构`);
       process.exit(0);
     }
   }
@@ -473,12 +892,15 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const cfg = loadConfig();
 
+  const wantOpenApi = args.format === 'openapi';
+
   const projectInfo = await fetchProjectInfo(cfg);
   const items = await fetchList(cfg);
   const tree = buildTree(items);
 
+  // OpenAPI 需要 request/response 详情,强制拉取(忽略 --no-details)
   let details = {};
-  if (!args.noDetails) {
+  if (!args.noDetails || wantOpenApi) {
     const apiIds = items
       .filter((i) => i.target_type && i.target_type !== 'folder')
       .map((i) => i.target_id)
@@ -487,18 +909,41 @@ async function main() {
   }
   const globalParam = await fetchGlobalParam(cfg);
 
-  if (args.asJson) {
-    fs.writeFileSync(args.out, exportJson(cfg, projectInfo, globalParam, tree, details), 'utf-8');
-    console.log(`已导出 JSON → ${args.out}`);
+  if (wantOpenApi) {
+    const spec = renderOpenAPI(cfg, projectInfo, globalParam, tree, details);
+    const out = args.out || 'openapi.json';
+    fs.writeFileSync(out, JSON.stringify(spec, null, 2), 'utf-8');
+    const nPaths = Object.keys(spec.paths || {}).length;
+    let nOps = 0;
+    for (const item of Object.values(spec.paths || {})) {
+      for (const m of OPENAPI_METHODS) if (item[m]) nOps++;
+    }
+    const nSkipped = items.filter(
+      (i) => i.target_type && i.target_type !== 'folder' && i.target_type !== 'api',
+    ).length;
+    console.log(`✓ OpenAPI 已生成: ${out}`);
+    console.log(`  项目: ${projectInfo.name || '?'}`);
+    console.log(`  路径 ${nPaths} 个, 操作 ${nOps} 个`);
+    if (nSkipped) {
+      console.log(`  已跳过 ${nSkipped} 个非 REST 类型(sse/graphql/websocket/socket/doc 等,OpenAPI 不支持)`);
+    }
     return;
   }
 
+  if (args.asJson) {
+    const out = args.out || 'apipost.json';
+    fs.writeFileSync(out, exportJson(cfg, projectInfo, globalParam, tree, details), 'utf-8');
+    console.log(`已导出 JSON → ${out}`);
+    return;
+  }
+
+  const out = args.out || DEFAULT_OUT;
   const md = renderMarkdown(cfg, projectInfo, globalParam, tree, details);
-  fs.writeFileSync(args.out, md, 'utf-8');
+  fs.writeFileSync(out, md, 'utf-8');
 
   const nApi = items.filter((i) => i.target_type !== 'folder').length;
   const nFolder = items.filter((i) => i.target_type === 'folder').length;
-  console.log(`✓ 文档已生成: ${args.out}`);
+  console.log(`✓ 文档已生成: ${out}`);
   console.log(`  项目: ${projectInfo.name || '?'}`);
   console.log(`  目录 ${nFolder} 个, 接口 ${nApi} 个, 已拉取详情 ${Object.keys(details).length} 个`);
   if (args.noDetails) console.log('  (使用 --no-details 模式，未拉取接口详情)');
@@ -523,4 +968,14 @@ module.exports = {
   renderGlobalParamMd,
   renderMarkdown,
   countNodes,
+  // OpenAPI
+  normalizeSchema,
+  mapFieldType,
+  paramToParameter,
+  paramsToParameters,
+  paramsToSchema,
+  bodyToRequestBody,
+  responseToOpenApi,
+  parseApiUrl,
+  renderOpenAPI,
 };

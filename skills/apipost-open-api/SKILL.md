@@ -1,11 +1,11 @@
 ---
 name: apipost-open-api
-description: Apipost 接口文档管理工具。通过 Open API 生成项目接口文档（导出为 Markdown），以及查看、创建、修改、删除 Apipost 项目中的接口、目录、文档等资源。当用户提到 Apipost、接口文档、API 文档同步/导出等相关操作时使用此技能。
+description: Apipost 接口文档管理工具。通过 Open API 管理项目中的接口、目录、文档等资源，并支持导出为 Markdown 接口文档或 OpenAPI 3.0（供前端自动生成 TypeScript 类型 / 请求 SDK）。当用户提到 Apipost、接口文档、API 文档同步/导出、生成 OpenAPI、前端类型生成等相关操作时使用此技能。
 ---
 
 # Apipost Open API Skill
 
-通过 Apipost 开放接口管理项目中的接口（API）、目录（Folder）、文档（Doc）等资源，并支持将整个项目导出为 Markdown 接口文档。
+通过 Apipost 开放接口管理项目中的接口（API）、目录（Folder）、文档（Doc）等资源，并支持将整个项目导出为 Markdown 接口文档或 OpenAPI 3.0（供前端自动生成类型与 SDK）。
 
 ## 基础信息
 
@@ -54,7 +54,7 @@ node <skill>/scripts/docs-check.js
 ├── scripts/
 │   ├── docs-check.js            # 配置检查（不输出值）
 │   ├── docs-list.js             # 接口列表树形展示
-│   └── docs-export.js           # 项目接口文档导出（Markdown）
+│   └── docs-export.js           # 项目接口文档导出（Markdown / OpenAPI / 原始 JSON）
 └── docs/
     └── open-api.md            # API 完整参考文档
 ```
@@ -88,6 +88,10 @@ node <skill>/scripts/docs-export.js --out docs/api.md
 # 仅导出目录树结构，不拉取每个接口详情（更快，用于概览）
 node <skill>/scripts/docs-export.js --no-details
 
+# 导出 OpenAPI 3.0 JSON（供前端类型/SDK 生成，见「核心能力三」）
+node <skill>/scripts/docs-export.js --format openapi
+node <skill>/scripts/docs-export.js --format openapi --out docs/openapi.json
+
 # 导出原始 JSON 结构（便于程序处理）
 node <skill>/scripts/docs-export.js --json --out apipost.json
 ```
@@ -107,6 +111,70 @@ node <skill>/scripts/docs-list.js --save tree.json
 ```
 
 只有需要获取接口的完整请求/响应详情时，才调用 `/open/apis/details`。
+
+## 核心能力三：导出 OpenAPI（供前端）
+
+把 Apipost 项目转换成 **OpenAPI 3.0 JSON**，前端工具链可直接消费，自动生成 TypeScript 类型、请求 SDK、Mock 数据，无需手抄接口定义。
+
+```bash
+node <skill>/scripts/docs-export.js --format openapi --out docs/openapi.json
+```
+
+### 前端消费示例
+
+**生成 TypeScript 类型**（配合 `openapi-typescript`）：
+
+```bash
+npx openapi-typescript docs/openapi.json -o src/api/types.ts
+```
+
+```ts
+import type { paths } from './api/types';
+type LoginBody = paths['/api/login']['post']['requestBody']['content']['application/json'];
+//   ^? { username: string; password: string }
+```
+
+**生成带类型的请求客户端**（配合 `openapi-fetch` 或 `swagger-typescript-api`）：
+
+```bash
+npx openapi-typescript docs/openapi.json -o src/api/types.ts
+npm i openapi-fetch
+```
+
+```ts
+import createClient from 'openapi-fetch';
+import type { paths } from './api/types';
+
+const client = createClient<paths>({ baseUrl: '/api' });
+// 路径、method、query/body 全部类型推导 —— 写错字段编译期报错
+const { data, error } = await client.POST('/api/login', {
+  body: { username: 'test', password: '123456' },
+});
+```
+
+### 转换规则
+
+| Apipost | OpenAPI 3.0 |
+| --- | --- |
+| `api` 类型 | paths 下的 operation |
+| 目录 (folder) | operation 的 `tags`（取直接父目录名） |
+| URL `:id` 风格路径参数 | `{id}`，并转成 `in: path` 参数（必填） |
+| `request.header/query/restful` 的 parameter[] | parameters（header/query/path） |
+| body `json`/`raw` 的 schema | 三级回退：① `raw_schema`（有实质 properties 时）② `raw_parameter`（点路径展开为嵌套）③ 从 `raw` 反推 |
+| body `form-data` / `urlencoded` | `multipart/form-data` / `application/x-www-form-urlencoded`，schema 由 parameter[] 点路径展开 |
+| `response.example[].expect.schema` | 响应 schema，同样三级回退（`expect.schema` → `raw_parameter` → 无） |
+| `response.example[].raw` | 响应 example（自动解析 JSON） |
+| 嵌套字段（如 `data.access_token`） | `raw_parameter` 的 key 用点路径表示，导出时展开为嵌套 object schema |
+| 项目级公共参数 `global_param.header/query` | 并入每个 operation（接口同名参数优先） |
+| 公共/接口认证 `bearer` / `basic` | `securitySchemes` + `security`；接口 `noauth` 用空 `security: []` 显式排除 |
+
+> **关于 schema 来源**：Apipost 实际数据中，`raw_schema` / `expect.schema` 常是空占位 `{"type":"object"}`，接口字段真正存放在 `raw_parameter` 数组里（每项含 `key`/`field_type`/`schema`/`not_null` 等）。导出脚本会自动按上述优先级回退，无需手动处理。点路径 key（`a.b.c`）会被展开为嵌套 object，因此前端生成的类型会是 `data?: { access_token: string }` 而非扁平的 `"data.access_token": string`。
+
+### 局限
+
+- **仅 REST**：`sse` / `graphql` / `websocket2` / `socketio` / `socket` / `socket_method` / `doc` 不进 OpenAPI（OpenAPI 不支持非 REST 协议），导出时计数告知。需要 WebSocket/GraphQL 的类型时，用 Markdown 或 `--json` 导出后单独处理。
+- **认证仅 bearer/basic**：digest/oauth2/hawk/awsv4 等异类认证不映射（导出不报错，但该项不生成 security）。
+- **仅 JSON 输出**：脚本坚持仅用 Node 内置模块，不引 YAML 依赖。需要 YAML 用 `npx @redocly/cli` 等工具转换。
 
 ## 核心接口
 

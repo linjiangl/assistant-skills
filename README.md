@@ -6,7 +6,7 @@
 
 | Skill | 说明 | 推荐安装范围 |
 | --- | --- | --- |
-| [`apipost-open-api`](skills/apipost-open-api/) | 通过 Apipost Open API 管理项目接口,导出 Markdown 接口文档。 | 项目级 |
+| [`apipost-open-api`](skills/apipost-open-api/) | 通过 Apipost Open API 管理项目接口,导出 Markdown 接口文档或 OpenAPI 3.0(供前端类型/SDK 生成)。 | 项目级 |
 
 > apipost-open-api 的 `config.json` 绑定具体项目(`project_id`),建议装到项目级目录。
 

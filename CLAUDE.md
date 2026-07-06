@@ -11,9 +11,12 @@ A collection of **Claude Code agent skills**. This is a content + scripts reposi
 ```
 skills/<skill-name>/
 ├── SKILL.md            # required — the skill itself, what Claude reads
+├── README.md           # optional — human-facing usage docs (install/config/quickstart)
 ├── scripts/            # optional — executable helpers invoked from the skill
 └── docs/              # optional — large docs loaded on demand, not by default
 ```
+
+`SKILL.md` is the AI-facing instruction file (what Claude reads and follows). `README.md`, when present, is the human-facing entry doc: what the skill is, how to install/configure it, and quickstart commands. Keep the two distinct in voice — SKILL.md is directive ("when the user needs… do these steps"), README.md is explanatory — and avoid duplicating deep detail; README links into SKILL.md / `docs/` for the full reference.
 
 `SKILL.md` must begin with YAML frontmatter:
 
@@ -40,3 +43,4 @@ The `apipost-open-api` skill establishes patterns to follow for any new skill th
 - **Scripts read `config.json` themselves**: helper scripts (e.g. `docs-export.js`, `docs-list.js`) load `config.json` internally, so the agent invokes them directly — the token never enters the conversation context.
 - **Load before curl**: for ad-hoc `curl`, load values into shell vars from `config.json` via a `node -e` one-liner consumed by `eval`, so the token doesn't appear in command-line args or captured stdout.
 - **Prefer helper scripts over raw API calls** when browsing/listing/exporting: scripts reshape flat JSON into compact, readable output (or render full Markdown docs), saving tokens versus dumping raw responses.
+- **Multiple export formats from one fetch**: `docs-export.js` defaults to Markdown; `--format openapi` transforms the same data into OpenAPI 3.0 JSON for frontend type/SDK generation (`openapi-typescript`/`openapi-fetch`); `--json` dumps Apipost's raw structure. The transformation (Apipost schema → standard JSON Schema, `:id` → `{id}`, folder → tag, global params merged) lives in the script, so the agent invokes it directly — the conversion never enters conversation context.
