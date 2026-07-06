@@ -51,9 +51,13 @@ node <skill>/scripts/docs-check.js
 ├── SKILL.md                     # 本文件
 ├── config.example.json          # 配置模板
 ├── config.json                  # 实际配置（agent 写入，不进仓库）
+├── example/
+│   └── project/
+│       └── SKILL.md             # 项目侧 skill 使用示例
 ├── scripts/
 │   ├── docs-check.js            # 配置检查（不输出值）
 │   ├── docs-list.js             # 接口列表树形展示
+│   ├── docs-upsert.js           # 创建或更新单个接口文档
 │   └── docs-export.js           # 项目接口文档导出（Markdown / OpenAPI / 原始 JSON）
 └── docs/
     └── open-api.md            # API 完整参考文档
@@ -100,7 +104,38 @@ node <skill>/scripts/docs-export.js --json --out apipost.json
 
 输出末尾会打印简短摘要（项目名、目录/接口数、已拉取详情数），不含敏感信息。
 
-## 核心能力二：浏览接口树
+## 核心能力二：创建或更新单个接口文档
+
+使用 `docs-upsert.js`，不要临时拼 curl/Python。脚本会按 `method + url` 查找已有接口：存在则整体更新，不存在则创建；目录不存在时按 `folder` 自动创建，`folder` 支持用 `/` 表示多级目录。
+
+```bash
+node <skill>/scripts/docs-upsert.js --file api.json
+```
+
+`api.json` 最小结构：
+
+```json
+{
+  "folder": "授权",
+  "name": "用户登录",
+  "method": "POST",
+  "url": "/api/auth/login",
+  "auth": "noauth",
+  "description": "前台用户登录接口",
+  "params": [
+    {"key":"username","type":"string","required":true,"value":"alice","description":"用户名"},
+    {"key":"password","type":"string","required":true,"value":"secret123","description":"密码"}
+  ],
+  "responseParams": [
+    {"key":"status","type":"integer","required":true,"value":"200","description":"HTTP 状态码"}
+  ],
+  "responseExample": {"status":200,"success":true,"code":10000,"message":"ok","data":{},"timestamp":1720000000}
+}
+```
+
+参数位置约定：`GET` 写 Query；非 `GET` 写 Body `form-data`。
+
+## 核心能力三：浏览接口树
 
 **浏览、查找、列出接口时，优先使用 `docs-list.js`**，不要直接 curl 调 list 接口。脚本把扁平 JSON 组织成树形层级，包含每个目录和接口的 `[target_id]`，比拿一大段 JSON 节省 Token 且更清晰。
 
@@ -112,7 +147,7 @@ node <skill>/scripts/docs-list.js --save tree.json
 
 只有需要获取接口的完整请求/响应详情时，才调用 `/open/apis/details`。
 
-## 核心能力三：导出 OpenAPI（供前端）
+## 核心能力四：导出 OpenAPI（供前端）
 
 把 Apipost 项目转换成 **OpenAPI 3.0 JSON**，前端工具链可直接消费，自动生成 TypeScript 类型、请求 SDK、Mock 数据，无需手抄接口定义。
 

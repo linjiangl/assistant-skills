@@ -60,6 +60,9 @@ node <skill>/scripts/docs-export.js --format openapi --out docs/openapi.json
 # 浏览接口树
 node <skill>/scripts/docs-list.js
 
+# 创建或更新单个接口文档
+node <skill>/scripts/docs-upsert.js --file api.json
+
 # 检查配置是否就绪（不输出敏感值）
 node <skill>/scripts/docs-check.js
 ```
@@ -98,9 +101,13 @@ apipost-open-api/
 ├── README.md              # 本文件（人向使用说明）
 ├── config.example.json    # 配置模板
 ├── config.json            # 实际配置（你填写，不进仓库）
+├── example/
+│   └── project/
+│       └── SKILL.md       # 项目侧 skill 使用示例
 ├── scripts/
 │   ├── docs-check.js      # 配置检查（不输出敏感值）
 │   ├── docs-list.js       # 接口列表树形展示
+│   ├── docs-upsert.js     # 创建或更新单个接口文档
 │   └── docs-export.js     # 文档导出（Markdown / OpenAPI / 原始 JSON）
 └── docs/
     └── open-api.md        # Apipost Open API 完整参考
