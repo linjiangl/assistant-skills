@@ -1,0 +1,2 @@
+# 实际配置（含 token，agent 写入），不进仓库；模板 config.example.json 仍提交
+config.json
