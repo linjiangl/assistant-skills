@@ -14,29 +14,13 @@ description: Use when modifying project API routes, controllers, request validat
 1. 从代码确认接口信息：请求方法、完整路径、鉴权方式、Request 校验规则、成功响应和关键业务错误。
 2. 接口代码写完后，先询问用户是否同步 Apipost 文档；用户未确认前不要创建或更新文档。
 3. 如果用户已经明确要求更新、同步、生成接口文档，则视为已确认，直接执行同步流程。
-4. 用户确认后，先查看现有 Apipost 目录树，避免重复创建：
-
-   ```bash
-   node .agents/skills/apipost-open-api/scripts/docs-list.js
-   ```
-
-5. 在 `/tmp/opencode/` 准备临时接口规格 JSON，调用 upsert：
-
-   ```bash
-   node .agents/skills/apipost-open-api/scripts/docs-upsert.js --file /tmp/opencode/api.json
-   ```
-
-6. 文档更新后删除临时规格 JSON。
-7. 再次查看目录树，确认接口位置、方法和路径正确：
-
-   ```bash
-   node .agents/skills/apipost-open-api/scripts/docs-list.js
-   ```
+4. 用户确认后，同时使用 `apipost-open-api` skill 执行 Apipost 侧操作；具体脚本、删除、创建、更新和验证流程以该 skill 为准。
+5. 本 skill 只提供项目 API 的接口识别、目录组织和接口规格编写规则。
 
 ## 规格约定
 - `folder`：目录名；多级目录用 `/` 分隔。
 - `method + url`：用于判断更新已有接口还是创建新接口。
-- `docs-upsert.js` 会整体覆盖接口请求和响应定义；更新已有接口时必须写完整 `params` 和 `responseParams`，不要只写本次变更字段。
+- 更新已有接口时必须写完整 `params` 和 `responseParams`，不要只写本次变更字段。
 - 公开接口使用 `auth: "noauth"`；登录态接口使用 `auth: "bearer"`。
 - `params` 必须写字段名、类型、是否必填、示例值、说明。
 - `GET` 参数写 `params`，脚本会放到 Apipost Query。
@@ -49,8 +33,8 @@ description: Use when modifying project API routes, controllers, request validat
 - 不要把 Apipost token 输出到对话、命令参数或仓库文件。
 
 ## 验证要求
-- 必跑：`node .agents/skills/apipost-open-api/scripts/docs-list.js`。
-- 字段级变更至少确认 `docs-upsert.js` 成功返回 `updated` 或 `created`；必要时导出文档或查看详情确认参数内容。
+- 必须按 `apipost-open-api` skill 的当前流程查看 Apipost 目录树。
+- 字段级变更至少确认 Apipost 文档已创建或更新；必要时导出文档或查看详情确认参数内容。
 - 确认接口位于正确目录，且请求方法和路径正确。
 - 只改本文档流程时无需运行应用测试。
 

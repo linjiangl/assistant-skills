@@ -57,6 +57,7 @@ node <skill>/scripts/docs-check.js
 ├── scripts/
 │   ├── docs-check.js            # 配置检查（不输出值）
 │   ├── docs-list.js             # 接口列表树形展示
+│   ├── docs-delete.js           # 删除接口文档（dry-run 默认）
 │   ├── docs-upsert.js           # 创建或更新单个接口文档
 │   └── docs-export.js           # 项目接口文档导出（Markdown / OpenAPI / 原始 JSON）
 └── docs/
@@ -148,7 +149,27 @@ node <skill>/scripts/docs-list.js --save tree.json
 
 只有需要获取接口的完整请求/响应详情时，才调用 `/open/apis/details`。
 
-## 核心能力四：导出 OpenAPI（供前端）
+## 核心能力四：删除接口文档
+
+**删除接口文档时，优先使用 `docs-delete.js`**，不要临时拼 curl 或把 token 写进命令。脚本默认 dry-run，只打印匹配项和将删除的目标；确认无误后追加 `--yes` 才会调用 `/open/apis/delete`。
+
+```bash
+# 按 target_id 删除
+node <skill>/scripts/docs-delete.js --ids id1,id2
+node <skill>/scripts/docs-delete.js --ids id1,id2 --yes
+
+# 同一路径存在多个 method 时，只保留指定 method，删除其他 method
+node <skill>/scripts/docs-delete.js --url "/api/upload/callback/{flag}" --keep-method POST
+node <skill>/scripts/docs-delete.js --url "/api/upload/callback/{flag}" --keep-method POST --yes
+```
+
+删除后再运行 `docs-list.js` 验证结果：
+
+```bash
+node <skill>/scripts/docs-list.js --save /tmp/apipost-tree-after.json
+```
+
+## 核心能力五：导出 OpenAPI（供前端）
 
 把 Apipost 项目转换成 **OpenAPI 3.0 JSON**，前端工具链可直接消费，自动生成 TypeScript 类型、请求 SDK、Mock 数据，无需手抄接口定义。
 
@@ -255,7 +276,7 @@ POST https://open.apipost.net/open/apis/update
 POST https://open.apipost.net/open/apis/delete
 ```
 
-Body: `project_id` + `target_ids`（数组）。删除目录会级联删除其下所有子项。
+Body: `project_id` + `target_ids`（数组）。删除目录会级联删除其下所有子项。实际删除优先用 `docs-delete.js`，先 dry-run 再加 `--yes`。
 
 ### 5. 获取多条接口详情
 
@@ -275,6 +296,14 @@ Body: `project_id` + `target_ids`（数组）。返回完整 `request`/`response
 
 ```bash
 node <skill>/scripts/docs-export.js --out docs/api.md
+```
+
+### 删除重复接口文档
+
+```bash
+node <skill>/scripts/docs-delete.js --url "/api/upload/callback/{flag}" --keep-method POST
+node <skill>/scripts/docs-delete.js --url "/api/upload/callback/{flag}" --keep-method POST --yes
+node <skill>/scripts/docs-list.js --save /tmp/apipost-tree-after.json
 ```
 
 ### 创建一个 HTTP 接口
@@ -327,5 +356,5 @@ curl -s -X POST \
 - 所有ID都是16进制雪花ID格式，`parent_id` 默认 `"0"`（根目录）
 - 删除目录会级联删除其下所有子接口和子目录
 - 修改接口是整体覆盖，必须先获取完整数据再修改后提交
-- **生成文档用 `docs-export.js`，浏览用 `docs-list.js`**，二者均在进程内读取 `config.json`，不把 token 暴露给对话
+- **生成文档用 `docs-export.js`，浏览用 `docs-list.js`，删除用 `docs-delete.js`**，这些脚本均在进程内读取 `config.json`，不把 token 暴露给对话
 - ad-hoc curl 用「从配置加载到 shell 变量」的方式，不要硬编码 token
