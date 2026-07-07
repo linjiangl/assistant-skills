@@ -9,7 +9,7 @@
  *   cat api.json | node scripts/docs-upsert.js
  *
  * 约定:
- *   GET 参数写 Query；非 GET 参数写 Body form-data。
+ *   GET 参数写 Query；非 GET 参数写 Body form-data；pathParams/restfulParams 写 Path。
  */
 
 const fs = require('fs');
@@ -130,8 +130,10 @@ function buildApiPayload(cfg, spec, parentId, existing) {
 
   const seed = String(existing && existing.target_id || `${method}${spec.url}`.replace(/[^a-z0-9]/gi, '').toLowerCase()).slice(0, 20);
   const requestParams = (spec.requestParams || spec.params || []).map((p, i) => normalizeParam(p, seed, i));
+  const pathParams = (spec.pathParams || spec.restfulParams || []).map((p, i) => normalizeParam(p, `${seed}p`, i));
   const responseParams = (spec.responseParams || []).map((p, i) => normalizeParam(p, `${seed}r`, i));
   const request = baseRequest(spec.auth || 'noauth');
+  request.restful.parameter = pathParams;
 
   if (method === 'GET') {
     request.query.parameter = requestParams;

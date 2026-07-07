@@ -40,10 +40,11 @@ description: Use when modifying project API routes, controllers, request validat
 - 公开接口使用 `auth: "noauth"`；登录态接口使用 `auth: "bearer"`。
 - `params` 必须写字段名、类型、是否必填、示例值、说明。
 - `GET` 参数写 `params`，脚本会放到 Apipost Query。
+- 路径参数写 `pathParams` 或 `restfulParams`，不要写进 `params`；例如 `/api/items/{id}` 的 `id` 写 `pathParams`。
 - `between` 日期范围这类 `GET` 查询优先使用逗号分隔字符串，例如 `date=2026-07-01,2026-07-31`，便于 Apipost 直接测试。
 - 非 `GET` 参数写 `params`，脚本会放到 Apipost Body form-data。
 - `responseParams` 必须写字段名、类型、是否必填、示例值、说明。
-- 不要只写 `responseExample`，否则 Apipost 客户端里参数说明不完整。
+- 不要写 `responseExample`；有的接口响应体太大，维护完整 `responseParams` 即可。
 - 参数说明优先从 Request 的 `rules()` / `attributes()`、Controller 入参、Service 返回结构和测试断言里提取。
 - 不要把 Apipost token 输出到对话、命令参数或仓库文件。
 
@@ -62,17 +63,13 @@ description: Use when modifying project API routes, controllers, request validat
   "url": "/api/example/items",
   "auth": "bearer",
   "description": "接口说明",
+  "pathParams": [],
   "params": [
     {"key":"keyword","type":"string","required":false,"value":"demo","description":"搜索关键词"}
   ],
   "responseParams": [
     {"key":"records","type":"array","required":true,"value":"[]","description":"列表数据"},
     {"key":"records.id","type":"integer","required":true,"value":"1","description":"记录 ID"}
-  ],
-  "responseExample": {
-    "records": [
-      {"id": 1}
-    ]
-  }
+  ]
 }
 ```

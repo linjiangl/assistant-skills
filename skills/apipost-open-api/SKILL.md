@@ -122,6 +122,7 @@ node <skill>/scripts/docs-upsert.js --file api.json
   "url": "/api/auth/login",
   "auth": "noauth",
   "description": "前台用户登录接口",
+  "pathParams": [],
   "params": [
     {"key":"username","type":"string","required":true,"value":"alice","description":"用户名"},
     {"key":"password","type":"string","required":true,"value":"secret123","description":"密码"}
@@ -133,7 +134,7 @@ node <skill>/scripts/docs-upsert.js --file api.json
 }
 ```
 
-参数位置约定：`GET` 写 Query；非 `GET` 写 Body `form-data`。
+参数位置约定：`GET` 的 `params` 写 Query；非 `GET` 的 `params` 写 Body `form-data`；`pathParams` 或 `restfulParams` 写 Path。路径中的 `{id}`、`{uuid}` 这类占位符不要放进 `params`。
 
 ## 核心能力三：浏览接口树
 
